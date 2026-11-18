@@ -43,4 +43,5 @@ jobs:
             echo "无变化"; exit 0
           fi
           git commit -m "feat(apk): run/x86/daed 同步上游 $TAG"
-          git push
+          git pull --rebase --autostash
+  git push
