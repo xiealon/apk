@@ -44,4 +44,4 @@ jobs:
           fi
           git commit -m "feat(apk): run/x86/daed 同步上游 $TAG"
           git pull --rebase --autostash
-  git push
+          git push
