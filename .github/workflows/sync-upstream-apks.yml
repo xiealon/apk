@@ -17,13 +17,13 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: apk-repo-writer
-  cancel-in-progress: false
-
 jobs:
   sync:
     runs-on: ubuntu-latest
+    # 三个 matrix job 会同时 push 同一个分支，必须排队；放在 job 级才管用
+    concurrency:
+      group: apk-repo-writer
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
