@@ -97,6 +97,8 @@ jobs:
           norm() {
             n=$(basename "$1"); n=${n%.apk}
             n=$(printf '%s' "$n" | sed -E 's/-(x86_64|aarch64_[a-z0-9_]+|arm_[a-z0-9_-]+|i386_pentium4|mips[a-z0-9_]*)$//')
+            # 上游也有用下划线接架构的：xray-core-26.11.9-r2_x86_64 → xray-core-26.11.9-r2
+            n=$(printf '%s' "$n" | sed -E 's/_(x86_64|aarch64_[a-z0-9_]+|arm_[a-z0-9_-]+|i386_pentium4|mips[a-z0-9_]*)$//')
             n=$(printf '%s' "$n" | sed -E 's/\.([0-9a-f]{6,10})$/~\1/')
             printf '%s.apk\n' "$n"
           }
