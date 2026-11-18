@@ -1,0 +1,130 @@
+name: Sync upstream apks
+# 从上游 release 直接取 25.12 的 apk，落到 run/x86/<组>/ 后 commit + push。
+# 下载、改名、提交全在 GitHub Actions runner 里完成，不经过本机中转。
+#
+# 组与上游对应：
+#   ssrp    fw876/helloworld            luci-app-ssr-plus / i18n / xray-core
+#   nikki   nikkinikki-org/OpenWrt-nikki nikki_x86_64-openwrt-25.12.tar.gz
+#   mosdns  sbwml/luci-app-mosdns        x86_64-openwrt-25.12.tar.gz
+on:
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: '要同步的组（空格分隔：ssrp nikki mosdns）'
+        required: false
+        default: 'ssrp nikki mosdns'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-apks
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [ssrp, nikki, mosdns]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: 组过滤
+        id: gate
+        env:
+          GROUPS: ${{ github.event.inputs.groups || 'ssrp nikki mosdns' }}
+        run: |
+          case " $GROUPS " in
+            *" ${{ matrix.group }} "*) echo "run=1" >> "$GITHUB_OUTPUT" ;;
+            *)                         echo "run=0" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: 同步 ${{ matrix.group }}
+        if: steps.gate.outputs.run == '1'
+        run: |
+          set -euo pipefail
+
+          case "${{ matrix.group }}" in
+            ssrp)
+              REPO=fw876/helloworld
+              PAT='^(luci-app-ssr-plus|luci-i18n-ssr-plus-zh-cn|xray-core)-[0-9].*\.apk$'
+              DIR=run/x86/ssrp
+              CLEAN='luci-app-ssr-plus-* luci-i18n-ssr-plus-zh-cn-* xray-core-*'
+              ;;
+            nikki)
+              REPO=nikkinikki-org/OpenWrt-nikki
+              PAT='^nikki_x86_64-openwrt-25\.12\.tar\.gz$'
+              DIR=run/x86/nikki
+              CLEAN='nikki-* luci-app-nikki-* luci-i18n-nikki-zh-cn-*'
+              ;;
+            mosdns)
+              REPO=sbwml/luci-app-mosdns
+              PAT='^x86_64-openwrt-25\.12\.tar\.gz$'
+              DIR=run/x86/mosdns25
+              CLEAN='mosdns-* luci-app-mosdns-* luci-i18n-mosdns-zh-cn-*'
+              ;;
+          esac
+
+          API="https://api.github.com/repos/$REPO/releases"
+          TAG=$(curl -fsSL "$API?per_page=5" \
+                | jq -r 'map(select(.prerelease==false))|sort_by(.published_at)|last|.tag_name')
+          echo "上游 $REPO -> $TAG"
+          curl -fsSL "$API/tags/$TAG" -o /tmp/rel.json
+
+          rm -rf /tmp/raw /tmp/x && mkdir -p /tmp/raw /tmp/x
+          jq -r '.assets[] | .name + "\t" + .browser_download_url' /tmp/rel.json \
+            | grep -E "$PAT" > /tmp/list.txt || true
+          [ -s /tmp/list.txt ] || { echo "::error::上游 $REPO $TAG 没有匹配 $PAT 的资产"; exit 1; }
+          cat /tmp/list.txt
+
+          while IFS=$(printf '\t') read -r name url; do
+            [ -n "${name:-}" ] || continue
+            curl -fsSL -o "/tmp/raw/$name" "$url"
+            echo "  + $name  $(stat -c%s "/tmp/raw/$name") B"
+            case "$name" in
+              *.tar.gz) tar -xzf "/tmp/raw/$name" -C /tmp/x ;;
+            esac
+          done < /tmp/list.txt
+
+          # 统一改名为 apk 索引要求的 <pkgname>-<pkgver>.apk：
+          #   1) 去掉上游追加的 -<架构>
+          #   2) 版本末段 <hex> 前面的点还原成 ~（上游常把 ~ 换成 .，
+          #      如 luci-i18n-ssr-plus-zh-cn-26.312.12854.425d480 实际是 26.312.12854~425d480）
+          norm() {
+            n=$(basename "$1"); n=${n%.apk}
+            n=$(printf '%s' "$n" | sed -E 's/-(x86_64|aarch64_[a-z0-9_]+|arm_[a-z0-9_-]+|i386_pentium4|mips[a-z0-9_]*)$//')
+            n=$(printf '%s' "$n" | sed -E 's/\.([0-9a-f]{6,10})$/~\1/')
+            printf '%s.apk\n' "$n"
+          }
+
+          mkdir -p "$DIR"
+          shopt -s nullglob
+          for pat in $CLEAN; do
+            for f in "$DIR"/$pat; do rm -f "$f"; done
+          done
+          if [ "${{ matrix.group }}" = "mosdns" ]; then
+            rm -f run/x86/25-mosdns_v*.run
+          fi
+
+          n=0
+          while IFS= read -r f; do
+            t="$DIR/$(norm "$f")"
+            cp -f "$f" "$t"
+            echo "  -> $t  $(stat -c%s "$t") B"
+            n=$((n + 1))
+          done < <(find /tmp/raw /tmp/x -type f -name '*.apk')
+          [ "$n" -ge 1 ] || { echo "::error::解出来 0 个 apk"; exit 1; }
+          echo "本组共 $n 个 apk"
+
+          ls -la "$DIR"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A run/x86
+          if git diff --cached --quiet; then
+            echo "无变化"; exit 0
+          fi
+          git commit -m "feat(apk): run/x86/${{ matrix.group }} 同步上游 $TAG"
+          git pull --rebase --autostash
+          git push
